@@ -17,5 +17,6 @@ Global averages hide regional contrasts. Across the Third Pole, high-altitude wa
 
 ## Quickstart
 ```bash
+git clone https://github.com/arsal011mahmood-hash/NASA-Earth-Trend-Climate-Detective.git
 pip install streamlit pandas numpy scipy statsmodels plotly pymannkendall
 streamlit run app.py
