@@ -1,0 +1,596 @@
+"""
+Third Pole Depletion - Streamlit front end.   Run:  streamlit run app.py
+
+Needs backend.py in the same folder, plus CSVs in data/karakoram/ (see backend.py).
+Install:  pip install "streamlit>=1.35" "plotly>=5.24" pandas numpy scipy
+The globe is drawn on a canvas with d3-geo (smooth); charts use plotly.js. Both load from a CDN, so the browser needs internet.
+"""
+from pathlib import Path
+
+import streamlit as st
+import streamlit.components.v1 as components
+
+import backend as bk
+
+st.set_page_config(page_title="Third Pole Depletion", page_icon="🌍", layout="wide")
+
+COMPONENT_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+<script async src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+:root{--blue:#5ec8ff;--ice:#eaf6ff;--mut:#9fb3c8}
+*{box-sizing:border-box}
+html,body{margin:0;background:transparent;overflow:hidden;overflow:clip;font-family:system-ui,"Segoe UI",Roboto,sans-serif;color:var(--ice)}
+#stage{position:relative;width:100%;height:760px;overflow:hidden;overflow:clip;-webkit-user-select:none;user-select:none}
+#gl{position:absolute;left:0;top:0;touch-action:none;cursor:grab}
+#gl.hand{cursor:pointer}#gl.grab{cursor:grabbing}#gl.off{cursor:default;pointer-events:none}
+#intro{position:absolute;left:24px;top:14px;right:24px;pointer-events:none;transition:opacity .5s}
+#intro h1{margin:0;font-size:30px}#intro p{margin:4px 0 0;color:var(--mut)}
+#note{position:absolute;left:26px;bottom:22px;font-size:11px;color:rgba(159,179,200,.65);pointer-events:none}
+
+/* right-hand panel */
+#panel{position:absolute;left:50%;right:14px;top:12px;bottom:12px;overflow-y:auto;overflow-x:hidden;border-radius:18px;
+ background:linear-gradient(160deg,rgba(14,34,64,.93),rgba(6,14,30,.96));border:1px solid rgba(150,210,255,.25);
+ box-shadow:0 0 40px rgba(94,200,255,.12);opacity:0;pointer-events:none;transform:translate3d(40px,0,0);
+ transition:opacity .7s ease,transform .9s cubic-bezier(.2,.8,.2,1);scrollbar-width:thin}
+#panel.show{opacity:1;pointer-events:auto;transform:none}
+#bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 22px;
+ background:#0a162c;border-bottom:1px solid rgba(150,210,255,.14)}
+#crumbs{font-size:13px;color:var(--mut);display:flex;gap:4px;align-items:center;flex-wrap:wrap}
+.crumb{background:none;border:0;color:var(--blue);cursor:pointer;padding:2px 6px;border-radius:6px;font-family:inherit;font-size:13px}
+.crumb:hover{background:rgba(94,200,255,.15)}
+#body{padding:4px 26px 26px}
+button.link{background:rgba(94,200,255,.12);border:1px solid rgba(150,210,255,.45);color:var(--ice);border-radius:20px;
+ padding:7px 16px;cursor:pointer;font-weight:600;font-size:13px;font-family:inherit}
+button.link:hover{background:rgba(94,200,255,.28)}
+.view{animation:vin .4s ease both}
+@keyframes vin{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+h1.t{text-align:center;margin:10px 0 2px;font-size:30px;letter-spacing:.5px}
+.sub{text-align:center;color:var(--blue);margin-bottom:12px}
+p{line-height:1.5;margin:8px 0}.note{color:var(--mut);font-size:13px}
+.warn{background:rgba(255,180,84,.12);border:1px solid rgba(255,180,84,.5);color:#ffcf8a;border-radius:10px;padding:8px 12px;font-size:13px;margin:8px 0}
+.dot{display:inline-block;width:11px;height:11px;border-radius:3px;margin:0 4px 0 12px;vertical-align:-1px}
+
+/* horizontal bars: name written ON the bar, gradient fill, grows in */
+#bars{margin:12px 0 6px}
+.row{position:relative;height:48px;margin:9px 0;border-radius:12px;background:rgba(255,255,255,.07);overflow:hidden;cursor:pointer;
+ border:1px solid rgba(255,255,255,.07);transition:transform .18s ease,box-shadow .18s ease,border-color .18s}
+.row:hover,.row:focus-visible{transform:translateX(3px);border-color:rgba(150,210,255,.55);box-shadow:0 6px 22px rgba(0,0,0,.35);outline:none}
+.fill{position:absolute;left:0;top:0;bottom:0;width:0;overflow:hidden;border-radius:12px;
+ transition:width 1.1s cubic-bezier(.2,.8,.2,1);transition-delay:calc(var(--i)*80ms)}
+.fill i{position:absolute;left:0;top:0;bottom:0;width:calc(100% / var(--f));
+ background:linear-gradient(90deg,#0a4f95 0%,#1688d8 45%,#43c6ff 80%,#9eecff 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,.28)}
+.row.non .fill i{background:linear-gradient(90deg,#2a3340 0%,#455263 50%,#6d7c8f 85%,#97a5b6 100%)}
+#bars.in .fill{width:calc(var(--f)*100%)}
+.name{position:absolute;left:15px;top:0;bottom:0;display:flex;align-items:center;font-weight:650;font-size:15px;color:#fff;
+ text-shadow:0 1px 3px rgba(0,0,0,.75);z-index:2;pointer-events:none}
+.val{position:absolute;right:13px;top:0;bottom:0;display:flex;align-items:center;font-size:12px;color:#fff;z-index:2;
+ text-shadow:0 1px 3px rgba(0,0,0,.8);pointer-events:none;white-space:nowrap}
+.val .arr{margin-right:6px;font-size:11px}
+
+/* result card */
+#card{background:rgba(255,255,255,.05);border-radius:12px;padding:12px 16px;margin-top:10px}
+.chip{display:inline-block;padding:4px 12px;border-radius:14px;font-weight:600;margin-bottom:8px}
+.chip.sig{background:#1f6fa8;color:#fff}.chip.non{background:#55616f;color:#fff}
+#grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0}
+#grid div{background:rgba(0,0,0,.25);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--mut)}
+#grid b{display:block;font-size:15px;color:var(--ice)}
+#wlabel{text-align:center;font-size:22px;font-weight:650;color:var(--blue);margin:10px 0 0}
+
+/* window slider: one track, two thumbs, presets */
+#chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:8px 0 0}
+.chipb{background:rgba(255,255,255,.07);border:1px solid rgba(150,210,255,.3);color:var(--ice);border-radius:16px;padding:5px 12px;
+ cursor:pointer;font-size:12px;font-family:inherit}
+.chipb:hover{background:rgba(94,200,255,.16)}
+.chipb.on{background:linear-gradient(90deg,#1f7fd0,#2fb4f0);border-color:transparent;color:#fff;font-weight:600}
+#rng{position:relative;height:56px;margin:8px 12px 0;touch-action:none;cursor:pointer}
+#rng .track{position:absolute;left:0;right:0;top:30px;height:6px;border-radius:3px;background:rgba(255,255,255,.14)}
+#rng .sel{position:absolute;top:30px;height:6px;border-radius:3px;background:linear-gradient(90deg,#2aa7ff,#7be0ff);box-shadow:0 0 12px rgba(94,200,255,.5)}
+.th{position:absolute;top:22px;width:22px;height:22px;margin-left:-11px;border-radius:50%;background:#fff;border:4px solid #2aa7ff;
+ box-shadow:0 2px 8px rgba(0,0,0,.5);cursor:grab;outline:none;touch-action:none;transition:box-shadow .15s,transform .15s}
+.th:hover{transform:scale(1.12)}
+.th:focus-visible,.th.drag{box-shadow:0 0 0 5px rgba(94,200,255,.4),0 2px 8px rgba(0,0,0,.5)}
+.th b{position:absolute;bottom:28px;left:50%;transform:translateX(-50%);background:#12385f;border:1px solid rgba(150,210,255,.5);
+ border-radius:8px;padding:1px 8px;font-size:12px;font-weight:650;white-space:nowrap;pointer-events:none}
+#ticks{position:relative;height:16px;margin:0 12px;font-size:11px;color:var(--mut)}
+#ticks span{position:absolute;transform:translateX(-50%)}
+#ts{margin-top:6px}
+
+details{margin-top:14px;font-size:13px;color:var(--mut)}summary{cursor:pointer;color:var(--blue)}
+details ul{padding-left:18px;margin:8px 0}details li{margin:4px 0}
+
+@media (max-width:820px){
+ #panel{left:10px;right:10px;top:calc(42% + 14px);bottom:10px;transform:translate3d(0,40px,0)}
+ #intro h1{font-size:24px}
+ #crumbs{display:none}
+ h1.t{font-size:24px}
+ .row{height:58px}.name{top:7px;bottom:auto;height:22px;font-size:14px}
+ .val{left:15px;right:auto;top:auto;bottom:6px;height:18px}
+ #grid{grid-template-columns:repeat(2,1fr)}
+ #body{padding:4px 16px 22px}#bar{padding:10px 14px}
+}
+</style></head>
+<body><div id="stage">
+ <canvas id="gl"></canvas>
+ <div id="intro"><h1>Trend Detective</h1><p>Earth is spinning. Drag to spin it yourself, then click the glowing region.</p></div>
+ <div id="note">Loading map…</div>
+ <div id="panel">
+  <div id="bar"><button class="link" id="back">← Back to Earth</button><div id="crumbs"></div></div>
+  <div id="body">
+   <div id="v-region">
+    <h1 class="t">Third Pole Depletion</h1>
+    <div class="sub" id="rsub"></div>
+    <p id="tpdef"></p>
+    <div id="demo-warn"></div>
+    <p id="tally" style="text-align:center"></p>
+    <div id="bars"></div>
+    <p class="note" style="text-align:center">Click a bar to investigate that variable. Bar length = how consistent the trend is (Kendall τ, 0 to 1); ▲ rising, ▼ falling.</p>
+    <details><summary>Data sources &amp; credits</summary><ul id="creditlist"></ul>
+     <p>Map outlines: Natural Earth via the world-atlas package. Satellite imagery: NASA Blue Marble Next Generation, served by NASA GIBS (Earth Observing System Data and Information System). Trend statistics are computed by this app from the data files listed above.</p></details>
+   </div>
+   <div id="v-var" style="display:none">
+    <h1 class="t" id="vt"></h1>
+    <div class="sub" id="vsrc"></div>
+    <div id="vdemo"></div>
+    <p id="vdef"></p><p class="note" id="vwhy"></p>
+    <div id="wlabel"></div>
+    <div id="chips"></div>
+    <div id="rng"><div class="track"></div><div class="sel" id="sel"></div>
+     <div class="th" id="th0" role="slider" tabindex="0" aria-label="From year"><b id="b0"></b></div>
+     <div class="th" id="th1" role="slider" tabindex="0" aria-label="To year"><b id="b1"></b></div></div>
+    <div id="ticks"></div>
+    <p class="note" style="text-align:center;margin-top:2px">Drag the two handles or pick a preset. Glacier loss has sped up since 2000, so compare windows.</p>
+    <div id="ts"></div>
+    <div id="card"><div id="verdict"></div><div id="grid"></div><p id="sentence"></p><p class="note" id="agree"></p></div>
+    <p class="note">Method: each month minus that calendar month's long-term average (removes the seasonal cycle). Linear trend by least squares, with a confidence interval widened for month-to-month autocorrelation. Mann-Kendall test on yearly averages. A straight line is only a first approximation: move the handles to see whether the trend changes over time.</p>
+   </div>
+  </div>
+ </div>
+</div>
+<script>
+function send(type,data){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data),"*");}
+let started=false;
+window.addEventListener("message",e=>{if(e.data&&e.data.type==="streamlit:render"&&!started){started=true;start(e.data.args.payload);}});
+send("streamlit:componentReady",{apiVersion:1});
+/* Fit the frame to the browser window so the page itself never needs to scroll (a scrolled page pushes the Back
+   button under Streamlit's header). Falls back to 760px if the parent window cannot be read. */
+let FTOP=null;
+function fit(){
+ let h=760;
+ try{const pw=window.parent,fe=window.frameElement;
+  if(pw&&fe){if(FTOP===null)FTOP=Math.max(0,fe.getBoundingClientRect().top);h=Math.max(520,Math.floor(pw.innerHeight-FTOP-6));}}
+ catch(_){h=760;}
+ const st=document.getElementById("stage");if(st)st.style.height=h+"px";
+ send("streamlit:setFrameHeight",{height:h});
+}
+fit();
+try{window.parent.addEventListener("resize",fit);}catch(_){}
+
+function start(D){
+ const $=id=>document.getElementById(id);
+ if(!window.d3||!window.topojson){$("note").textContent="Could not load the map libraries (an internet connection is needed). Reload the page.";return;}
+ const R=D.region,bb=R.bbox,clon=(bb[2]+bb[3])/2,clat=(bb[0]+bb[1])/2;
+ const V=D.variables,Y0=D.years[0],Y1=D.years[1],FULL=Y0+"-"+Y1,MINSPAN=4;
+ const stage=$("stage"),cnv=$("gl"),g=cnv.getContext("2d"),panel=$("panel");
+ const TAU=Math.PI*2,SPEED=6,FIT=0.46;           // SPEED: degrees per second of auto-spin; FIT: how much of the left half the region fills
+ const clamp=(p,a=0,b=1)=>Math.max(a,Math.min(b,p));
+ const ss=p=>{p=clamp(p);return p*p*p*(p*(p*6-15)+10);};     // smootherstep: zero velocity AND acceleration at both ends
+ const lerp=(a,b,t)=>a+(b-a)*t;
+ const rgb=(a,b,t)=>a.map((x,i)=>Math.round(lerp(x,b[i],t))).join(",");
+ const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+ const fmt=x=>(+x.toPrecision(3)).toString();
+ const fmtP=p=>p<0.001?"<0.001":p.toFixed(3);
+ const stat=(v,k)=>{const s=v.stats[k];return s?{slope:s[0],lo:s[1],hi:s[2],tau:s[3],p:s[4],ny:s[5],ic:s[6]}:null;};
+
+ /* =============== GLOBE: canvas + d3-geo, one requestAnimationFrame loop =============== */
+ const proj=d3.geoOrthographic().clipAngle(90).precision(0.35),path=d3.geoPath(proj,g);
+ let lo=null,hi=null,hiAnim=false;                              // low-res / high-res map layers; hiAnim: detailed layer is cheap enough to use mid-animation
+ const S={lon:clon+32,lat:24,k:1,v:0,m:0};                     // k zoom, v slide-to-left progress, m focus colour mix
+ let W=0,H=0,DPR=1,narrow=false,baseR=300,kF=8,dirty=true,mode="spin",anim=null,hover=false,dragging=false,vlon=0,vlat=0;
+
+ const ring=[];                                                // region outline, densified so it follows the parallels
+ const edge=(x0,y0,x1,y1)=>{const n=Math.max(2,Math.ceil(Math.hypot(x1-x0,y1-y0)/.25));for(let i=0;i<n;i++)ring.push([x0+(x1-x0)*i/n,y0+(y1-y0)*i/n]);};
+ edge(bb[2],bb[0],bb[2],bb[1]);edge(bb[2],bb[1],bb[3],bb[1]);edge(bb[3],bb[1],bb[3],bb[0]);edge(bb[3],bb[0],bb[2],bb[0]);ring.push([bb[2],bb[0]]);
+ const regionGeo={type:"Polygon",coordinates:[ring]};          // clockwise (SW,NW,NE,SE) or d3 fills the whole sphere
+ const grat10=d3.geoGraticule10();
+
+ /* =============== SATELLITE IMAGERY: NASA GIBS tiles, re-projected onto the globe =============== */
+ // Any Web-Mercator {z}/{y}/{x} tile service works here: change SAT_URL and SAT_MAXZ (the deepest zoom level it has).
+ const SAT_URL="https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/BlueMarble_NextGeneration/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg",SAT_MAXZ=8;
+ const sc=document.createElement("canvas"),sg=sc.getContext("2d"),tiles=new Map();   // sc: off-screen layer so the fade-in has no seams
+ const tx=lon=>(lon+180)/360,ty=lat=>{const s=Math.sin(lat*Math.PI/180);return .5-Math.log((1+s)/(1-s))/(4*Math.PI);};
+ function getTile(z,x,y,load){
+  const k=z+"/"+x+"/"+y;let t=tiles.get(k);
+  if(!t&&load){t={im:new Image(),ok:false};
+   t.im.onload=()=>{t.ok=t.im.naturalWidth>0;dirty=true;};t.im.onerror=()=>{t.bad=true;};
+   t.im.src=SAT_URL.replace("{z}",z).replace("{x}",x).replace("{y}",y);tiles.set(k,t);}
+  return t;
+ }
+ function bestTile(z,x,y){                                    // the tile itself, or a blurrier parent while it loads
+  const t=getTile(z,x,y,true);if(t&&t.ok)return{im:t.im,d:0};
+  if(z>2)getTile(z-2,x>>2,y>>2,true);
+  for(let d=1;d<=z;d++){const a=getTile(z-d,x>>d,y>>d,false);if(a&&a.ok)return{im:a.im,d:d};}
+  return null;
+ }
+ function prefetch(){                                         // fetch the world at low detail, and the region at full detail, before the user clicks
+  for(let z=0;z<=2;z++)for(let x=0;x<(1<<z);x++)for(let y=0;y<(1<<z);y++)getTile(z,x,y,true);
+  const px=(bb[3]-bb[2])*.8,py=(bb[1]-bb[0])*.8;
+  for(let z=3;z<=SAT_MAXZ;z++){const n=1<<z;
+   for(let x=Math.floor(tx(bb[2]-px)*n);x<=Math.floor(tx(bb[3]+px)*n);x++)
+    for(let y=Math.max(0,Math.floor(ty(bb[1]+py)*n));y<=Math.min(n-1,Math.floor(ty(bb[0]-py)*n));y++)getTile(z,((x%n)+n)%n,y,true);}
+ }
+ function tri(im,s0x,s0y,s1x,s1y,s2x,s2y,p0,p1,p2){            // draw the image triangle (s0,s1,s2) onto screen triangle (p0,p1,p2)
+  const det=(s1x-s0x)*(s2y-s0y)-(s2x-s0x)*(s1y-s0y);if(!det)return;
+  const ma=((p1[0]-p0[0])*(s2y-s0y)-(p2[0]-p0[0])*(s1y-s0y))/det,mc=((s1x-s0x)*(p2[0]-p0[0])-(s2x-s0x)*(p1[0]-p0[0]))/det,
+        mb=((p1[1]-p0[1])*(s2y-s0y)-(p2[1]-p0[1])*(s1y-s0y))/det,md=((s1x-s0x)*(p2[1]-p0[1])-(s2x-s0x)*(p1[1]-p0[1]))/det,
+        me=p0[0]-ma*s0x-mc*s0y,mf=p0[1]-mb*s0x-md*s0y;
+  const gx=(p0[0]+p1[0]+p2[0])/3,gy=(p0[1]+p1[1]+p2[1])/3;
+  sg.save();sg.beginPath();                                    // clip slightly larger than the triangle so neighbours overlap (no hairline seams)
+  [p0,p1,p2].forEach((p,i)=>{const dx=p[0]-gx,dy=p[1]-gy,l=Math.hypot(dx,dy)||1,x=p[0]+dx/l*.7,y=p[1]+dy/l*.7;if(i)sg.lineTo(x,y);else sg.moveTo(x,y);});
+  sg.closePath();sg.clip();sg.transform(ma,mb,mc,md,me,mf);sg.drawImage(im,0,0);sg.restore();
+ }
+ function drawSat(R0,b){                                      // returns true if any imagery was painted
+  let z=Math.min(SAT_MAXZ,Math.max(1,Math.ceil(Math.log2(R0*TAU*DPR/256))));
+  let dmin=1e9,dmax=-1e9,lmin=90,lmax=-90;
+  for(let i=0;i<=4;i++)for(let j=0;j<=4;j++){                  // what part of the Earth is in view?
+   const p=proj.invert([lerp(b.x0,b.x1,i/4),lerp(b.y0,b.y1,j/4)]);
+   if(!p||!isFinite(p[0])||!isFinite(p[1]))return false;
+   const dl=((p[0]-S.lon+540)%360+360)%360-180;
+   dmin=Math.min(dmin,dl);dmax=Math.max(dmax,dl);lmin=Math.min(lmin,p[1]);lmax=Math.max(lmax,p[1]);
+  }
+  if(lmax>84||lmin<-84)return false;
+  let n,x0,x1,y0,y1;
+  for(;;){n=1<<z;x0=Math.floor(tx(S.lon+dmin)*n);x1=Math.floor(tx(S.lon+dmax)*n);
+   y0=Math.max(0,Math.floor(ty(lmax)*n));y1=Math.min(n-1,Math.floor(ty(lmin)*n));
+   if((x1-x0+1)*(y1-y0+1)<=48||z<=1)break;z--;}                // never ask for more than ~48 tiles at once
+  sg.setTransform(DPR,0,0,DPR,0,0);sg.clearRect(0,0,W,H);
+  const ts=R0*TAU/n,sub=ts>360?8:ts>180?4:2,cen=[S.lon,S.lat];let drew=false;
+  for(let xi=x0;xi<=x1;xi++)for(let yi=y0;yi<=y1;yi++){
+   const xt=((xi%n)+n)%n,bt=bestTile(z,xt,yi);if(!bt)continue;
+   const P=[];let bad=false,x_min=1e9,x_max=-1e9,y_min=1e9,y_max=-1e9;
+   for(let j=0;j<=sub;j++)for(let i=0;i<=sub;i++){            // grid of points over the tile, projected onto the globe
+    const lon=(xi+i/sub)/n*360-180,lat=Math.atan(Math.sinh(Math.PI*(1-2*(yi+j/sub)/n)))*57.29577951308232;
+    if(d3.geoDistance([lon,lat],cen)>1.52)bad=true;            // behind the horizon
+    const p=proj([lon,lat]);P.push(p);x_min=Math.min(x_min,p[0]);x_max=Math.max(x_max,p[0]);y_min=Math.min(y_min,p[1]);y_max=Math.max(y_max,p[1]);
+   }
+   if(bad||x_max<b.x0||x_min>b.x1||y_max<b.y0||y_min>b.y1)continue;
+   const f=1<<bt.d,isz=bt.im.naturalWidth||256,ox=xt-((xt>>bt.d)<<bt.d),oy=yi-((yi>>bt.d)<<bt.d);
+   const sx=i=>(ox+i/sub)/f*isz,sy=j=>(oy+j/sub)/f*isz;
+   for(let j=0;j<sub;j++)for(let i=0;i<sub;i++){
+    const a=j*(sub+1)+i,c=a+sub+1;
+    tri(bt.im,sx(i),sy(j),sx(i+1),sy(j),sx(i+1),sy(j+1),P[a],P[a+1],P[c+1]);
+    tri(bt.im,sx(i),sy(j),sx(i+1),sy(j+1),sx(i),sy(j+1),P[a],P[c+1],P[c]);
+   }
+   drew=true;
+  }
+  return drew;
+ }
+ const dLat=(bb[1]-bb[0])*Math.PI/180,dLon=(bb[3]-bb[2])*Math.cos(clat*Math.PI/180)*Math.PI/180;
+
+ const focusBox=()=>narrow?{x0:8,y0:8,x1:W-8,y1:H*.42}:{x0:12,y0:12,x1:W*.5-8,y1:H-12};
+ const viewBox=()=>{const f=focusBox(),v=S.v;return{x0:lerp(0,f.x0,v),y0:lerp(0,f.y0,v),x1:lerp(W,f.x1,v),y1:lerp(H,f.y1,v)};};
+ function layout(){
+  const r=stage.getBoundingClientRect();if(!r.width)return;
+  W=r.width;H=r.height;DPR=Math.min(window.devicePixelRatio||1,2);narrow=W<820;
+  cnv.width=Math.round(W*DPR);cnv.height=Math.round(H*DPR);cnv.style.width=W+"px";cnv.style.height=H+"px";sc.width=cnv.width;sc.height=cnv.height;
+  baseR=Math.min(W,H)*.43;
+  const f=focusBox(),Rf=Math.min(FIT*(f.x1-f.x0)/dLon,FIT*(f.y1-f.y0)/dLat);
+  kF=Math.max(3,Rf/baseR);
+  if(mode==="region")S.k=kF;
+  dirty=true;
+ }
+ new ResizeObserver(layout).observe(stage);
+ prefetch();
+
+ function draw(now){
+  if(!W)return;
+  const m=S.m,R0=baseR*S.k,b=viewBox(),cx=(b.x0+b.x1)/2,cy=(b.y0+b.y1)/2;
+  proj.rotate([-S.lon,-S.lat]).scale(R0).translate([cx,cy]);
+  g.setTransform(DPR,0,0,DPR,0,0);g.clearRect(0,0,W,H);
+  g.save();
+  if(S.v>.001){const rad=lerp(0,18,S.v);g.beginPath();if(g.roundRect)g.roundRect(b.x0,b.y0,b.x1-b.x0,b.y1-b.y0,rad);else g.rect(b.x0,b.y0,b.x1-b.x0,b.y1-b.y0);g.clip();}
+  // atmosphere glow
+  const ga=(1-clamp((S.k-1)/1.2))*(1-m);
+  if(ga>.01){const gr=g.createRadialGradient(cx,cy,R0*.98,cx,cy,R0*1.22);gr.addColorStop(0,`rgba(110,190,255,${.5*ga})`);gr.addColorStop(1,"rgba(110,190,255,0)");
+   g.fillStyle=gr;g.beginPath();g.arc(cx,cy,R0*1.22,0,TAU);g.fill();}
+  // ocean sphere
+  const og=g.createRadialGradient(cx-R0*.35,cy-R0*.4,R0*.05,cx,cy,R0*1.02);
+  og.addColorStop(0,`rgb(${rgb([52,128,226],[18,48,96],m)})`);og.addColorStop(1,`rgb(${rgb([12,52,130],[9,26,58],m)})`);
+  g.fillStyle=og;g.beginPath();g.arc(cx,cy,R0,0,TAU);g.fill();
+  // graticule: 10 degree lines from afar, fine lines once zoomed in
+  g.lineWidth=1;g.strokeStyle="rgba(255,255,255,.07)";g.beginPath();path(grat10);g.stroke();
+  if(S.k>3){const sp=clamp(Math.max(W,H)*.8/R0*57.3,2,60),st=sp>12?5:sp>4?2:1,
+    gt=d3.geoGraticule().extent([[S.lon-sp,clamp(S.lat-sp,-89,89)],[S.lon+sp,clamp(S.lat+sp,-89,89)]]).step([st,st]).precision(.3);
+   g.strokeStyle=`rgba(190,225,255,${.11*clamp((S.k-3)/3)})`;g.beginPath();path(gt());g.stroke();}
+  // land + borders (high-res layer once zoomed in)
+  const L=(S.k>1.6&&hi&&(mode==="region"||hiAnim))?hi:lo;
+  if(L){
+   g.fillStyle=`rgb(${rgb([63,163,86],[54,82,110],m)})`;g.beginPath();path(L.land);g.fill();
+   g.lineWidth=1;g.strokeStyle=`rgba(255,255,255,${lerp(.55,.3,m)})`;g.stroke();
+   g.beginPath();path(L.borders);g.lineWidth=lerp(.6,1.1,m);g.strokeStyle=`rgba(255,255,255,${lerp(.28,.4,m)})`;g.stroke();
+  }
+  // satellite imagery (NASA GIBS) fades in as the camera closes in; the vector map underneath stays as a fallback
+  const cover=R0/Math.hypot((b.x1-b.x0)/2,(b.y1-b.y0)/2),sa=ss((cover-1.02)/1.4);
+  if(sa>.01){let ok=false;try{ok=drawSat(R0,b);}catch(_){}
+   if(ok){g.globalAlpha=sa;g.drawImage(sc,0,0,W,H);g.globalAlpha=1;
+    if(L){g.beginPath();path(L.borders);g.lineWidth=1;g.strokeStyle=`rgba(255,255,255,${.4*sa})`;g.stroke();}}}
+  // 3-D shading near the edge of the globe
+  const sh=(1-m)*(1-clamp((S.k-1)/1.5));
+  if(sh>.01){const lg=g.createRadialGradient(cx-R0*.25,cy-R0*.3,R0*.25,cx,cy,R0);lg.addColorStop(0,"rgba(0,0,0,0)");lg.addColorStop(1,`rgba(0,8,28,${.55*sh})`);
+   g.fillStyle=lg;g.beginPath();g.arc(cx,cy,R0,0,TAU);g.fill();}
+  // the region: glowing yellow while spinning, icy white-blue once focused
+  const rc=rgb([255,212,0],[205,240,255],m),pulse=.5+.5*Math.sin(now*.003);
+  g.beginPath();path(regionGeo);
+  g.fillStyle=`rgba(${rc},${lerp(.14,.3,m)*(1-.7*sa)})`;g.fill();
+  g.lineJoin="round";
+  g.lineWidth=lerp(10,14,m);g.strokeStyle=`rgba(${rc},${(.14+.14*pulse)*(1-m)+.12*m})`;g.stroke();
+  g.lineWidth=lerp(2.4,3,m);g.strokeStyle=`rgba(${rc},1)`;g.stroke();
+  // label
+  const pc=proj([clon,clat]);
+  if(pc&&m<.98){const a=1-m,h=R0*dLat/2;g.save();g.textAlign="center";g.shadowColor="rgba(0,0,0,.85)";g.shadowBlur=5;
+   g.fillStyle=`rgba(255,255,255,${a})`;g.font="600 13px system-ui,sans-serif";g.fillText(R.name,pc[0],pc[1]-h-9);
+   if(hover&&mode==="spin"){g.fillStyle=`rgba(255,226,120,${a})`;g.font="12px system-ui,sans-serif";g.fillText("Click to explore ›",pc[0],pc[1]+h+17);}
+   g.restore();}
+  g.restore();
+  if(S.v>.001){g.lineWidth=1.5;g.strokeStyle=`rgba(150,210,255,${.3*S.v})`;g.beginPath();
+   if(g.roundRect)g.roundRect(b.x0,b.y0,b.x1-b.x0,b.y1-b.y0,18);else g.rect(b.x0,b.y0,b.x1-b.x0,b.y1-b.y0);g.stroke();}
+ }
+
+ /* ---- main loop: spin physics, animations, drawing ---- */
+ let last=performance.now();
+ function frame(now){
+  const dt=Math.min((now-last)/1000,.05);last=now;
+  if(anim){const p=clamp((now-anim.t0)/anim.dur);anim.fn(p);dirty=true;if(p>=1){const d=anim.done;anim=null;if(d)d();}}
+  else if(mode==="spin"){
+   if(!dragging){
+    const target=hover?0:-SPEED;                                   // slow to a stop over the region so it is easy to click
+    vlon+=(target-vlon)*(1-Math.exp(-dt*(hover?5:1.6)));vlat+=(0-vlat)*(1-Math.exp(-dt*2.2));
+    S.lon+=vlon*dt;S.lat=clamp(S.lat+vlat*dt,-80,80);
+   }
+   S.lon=((S.lon+540)%360)-180;dirty=true;
+  }
+  if(dirty){dirty=false;draw(now);}
+  requestAnimationFrame(frame);
+ }
+ requestAnimationFrame(frame);
+
+ /* ---- pointer: drag with inertia, hover, click ---- */
+ let pid=null,sx=0,sy=0,lx=0,ly=0,lt=0,moved=0;
+ const pos=e=>{const r=cnv.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top];};
+ const hit=(x,y)=>{const p=proj([clon,clat]);return !!p&&Math.hypot(p[0]-x,p[1]-y)<Math.max(34,baseR*S.k*dLat*.9);};
+ cnv.addEventListener("pointerdown",e=>{
+  if(mode!=="spin"||(e.pointerType==="mouse"&&e.button!==0))return;
+  pid=e.pointerId;try{cnv.setPointerCapture(pid);}catch(_){}
+  const[x,y]=pos(e);sx=lx=x;sy=ly=y;lt=performance.now();moved=0;dragging=true;vlon=0;vlat=0;cnv.classList.add("grab");
+ });
+ cnv.addEventListener("pointermove",e=>{
+  const[x,y]=pos(e);
+  if(dragging&&e.pointerId===pid){
+   const now=performance.now(),dt=Math.max(.008,(now-lt)/1000),sens=.3/S.k,dx=x-lx,dy=y-ly;
+   S.lon-=dx*sens;S.lat=clamp(S.lat+dy*sens,-80,80);
+   vlon=clamp(lerp(vlon,-dx*sens/dt,.5),-240,240);vlat=clamp(lerp(vlat,dy*sens/dt,.5),-240,240);
+   moved=Math.max(moved,Math.hypot(x-sx,y-sy));lx=x;ly=y;lt=now;
+  }else if(mode==="spin"&&e.pointerType==="mouse"){const h=hit(x,y);if(h!==hover){hover=h;cnv.classList.toggle("hand",h);}}
+ });
+ const release=(e,click)=>{
+  if(!dragging||e.pointerId!==pid)return;
+  dragging=false;cnv.classList.remove("grab");
+  if(performance.now()-lt>90){vlon=0;vlat=0;}                      // paused before letting go: no throw
+  if(click&&moved<6){const[x,y]=pos(e);if(hit(x,y))enterRegion();}
+ };
+ cnv.addEventListener("pointerup",e=>release(e,true));
+ cnv.addEventListener("pointercancel",e=>release(e,false));
+ cnv.addEventListener("pointerleave",()=>{if(hover){hover=false;cnv.classList.remove("hand");}});
+
+ /* ---- the zoom + slide animation ---- */
+ function enterRegion(){
+  if(mode!=="spin")return;
+  mode="anim";hover=false;cnv.classList.remove("hand");cnv.classList.add("off");$("intro").style.opacity=0;
+  setView("region");
+  const f={lon:S.lon,lat:S.lat,k:S.k},dl=((clon-f.lon+540)%360)-180;let shown=false;
+  anim={t0:performance.now(),dur:3000,fn:p=>{
+   const r=ss(p/.86);                                                 // rotate to the region, settling a little before the zoom ends
+   S.lon=f.lon+dl*r;S.lat=lerp(f.lat,clat,r);
+   S.k=Math.exp(lerp(Math.log(f.k),Math.log(kF),ss((p-.06)/.94)));    // zoom is exponential, so it feels even
+   S.v=ss((p-.28)/.72);                                              // slide into the left half
+   S.m=ss((p-.12)/.7);                                               // Earth darkens, region turns icy
+   if(p>.74&&!shown){shown=true;panel.classList.add("show");renderBars();}
+  },done:()=>{mode="region";dirty=true;}};
+ }
+ function leaveRegion(){
+  if(mode!=="region")return;
+  mode="anim";panel.classList.remove("show");
+  const f={lon:S.lon,lat:S.lat,k:S.k,v:S.v,m:S.m},tl=clon+8,dl=((tl-f.lon+540)%360)-180;
+  anim={t0:performance.now(),dur:2400,fn:p=>{
+   S.v=f.v*(1-ss(p/.6));S.m=f.m*(1-ss(p/.7));
+   S.k=Math.exp(lerp(Math.log(f.k),0,ss((p-.1)/.9)));
+   const r=ss(p);S.lon=f.lon+dl*r;S.lat=lerp(f.lat,24,r);
+   if(p>.8)$("intro").style.opacity=1;
+  },done:()=>{S.k=1;S.v=0;S.m=0;vlon=0;vlat=0;cnv.classList.remove("off");mode="spin";}};
+ }
+
+ /* ---- map data: coarse file first (instant), detailed file swaps in once zoomed ---- */
+ const CDN="https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/";
+ const build=w=>({land:topojson.feature(w,w.objects.land),borders:topojson.mesh(w,w.objects.countries,(a,b)=>a!==b)});
+ fetch(CDN+"countries-110m.json").then(r=>r.json()).then(w=>{lo=build(w);dirty=true;$("note").textContent="Map: Natural Earth · Satellite imagery: NASA GIBS (Blue Marble)";})
+  .catch(()=>{$("note").textContent="Map outlines could not load (internet needed). The globe still works.";});
+ fetch(CDN+"countries-50m.json").then(r=>r.json()).then(w=>{const h=build(w),c2=document.createElement("canvas").getContext("2d"),pp=d3.geoPath(proj,c2);
+   let best=1e9;for(let i=0;i<3;i++){const t=performance.now();c2.beginPath();pp(h.land);pp(h.borders);best=Math.min(best,performance.now()-t);}
+   hiAnim=best<5;hi=h;dirty=true;}).catch(()=>{});
+
+ /* =============== NAVIGATION =============== */
+ let view="region",cvr=null;
+ function setView(v){
+  view=v;
+  const a=$("v-region"),b=$("v-var"),el=v==="region"?a:b;
+  a.style.display=v==="region"?"block":"none";b.style.display=v==="var"?"block":"none";
+  el.classList.remove("view");void el.offsetWidth;el.classList.add("view");
+  panel.scrollTop=0;
+  $("back").textContent=v==="region"?"← Back to Earth":"← All variables";
+  $("crumbs").innerHTML=v==="region"?'<button class="crumb" data-go="earth">Earth</button> › <b>Third Pole Depletion</b>'
+   :'<button class="crumb" data-go="earth">Earth</button> › <button class="crumb" data-go="region">Third Pole Depletion</button> › <b>'+esc(cvr?cvr.label:"")+"</b>";
+ }
+ function goBack(){if(view==="var"){setView("region");renderBars();}else leaveRegion();}
+ $("back").onclick=goBack;
+ $("crumbs").addEventListener("click",e=>{
+  const c=e.target.closest(".crumb");if(!c)return;
+  if(c.dataset.go==="region"){setView("region");renderBars();}
+  else{if(view==="var")setView("region");leaveRegion();}
+ });
+ document.addEventListener("keydown",e=>{if(e.key==="Escape"&&mode==="region")goBack();});
+
+ /* =============== REGION VIEW: horizontal gradient bars =============== */
+ $("rsub").textContent=R.name+" · satellite and model data, "+Y0+"–"+Y1;
+ $("tpdef").textContent="The Third Pole is the Hindu Kush–Himalaya–Tibetan Plateau region. It stores more ice than anywhere else on Earth outside the Arctic and Antarctica, and it feeds rivers that millions of people depend on. “Depletion” means that this ice and snow is being lost. Below, "+V.length+" signals for the "+R.name+" are tested for a trend. The "+R.name+" is famous for glaciers that have held up better than most of the Third Pole.";
+ const demos=V.filter(v=>v.demo);
+ if(demos.length)$("demo-warn").innerHTML='<div class="warn">⚠ DEMO DATA (synthetic, not real observations) for: '+demos.map(v=>esc(v.label)).join(", ")+'. Add the real CSVs to data/'+esc(R.id)+'/ to replace it.</div>';
+ $("creditlist").innerHTML=V.map(v=>"<li><b>"+esc(v.label)+"</b>: "+esc(v.source)+(v.demo?" <em>(synthetic demo data in use)</em>":"")+"</li>").join("");
+ function renderBars(){
+  const rows=V.map(v=>({v:v,s:stat(v,FULL)})).filter(r=>r.s);
+  rows.sort((a,b)=>((a.s.p<.05?0:1)-(b.s.p<.05?0:1))||(Math.abs(b.s.tau)-Math.abs(a.s.tau)));
+  const nSig=rows.filter(r=>r.s.p<.05).length;
+  $("tally").innerHTML="<b>"+nSig+"</b> of "+rows.length+" signals show a statistically significant trend (p &lt; 0.05); <b>"+(rows.length-nSig)+"</b> do not."+
+   '<br><span class="dot" style="background:#2fb4f0"></span>significant<span class="dot" style="background:#6d7c8f"></span>not significant';
+  const bars=$("bars");bars.classList.remove("in");
+  bars.innerHTML=rows.map((r,i)=>{
+   const sig=r.s.p<.05,f=Math.max(.05,Math.min(1,Math.abs(r.s.tau))),up=r.s.tau>0;
+   return '<div class="row '+(sig?"sig":"non")+'" tabindex="0" role="button" data-key="'+esc(r.v.key)+'" style="--f:'+f.toFixed(3)+';--i:'+i+'" aria-label="'+esc(r.v.label)+', '+(up?"rising":"falling")+', '+(sig?"significant":"not significant")+'">'+
+    '<div class="fill"><i></i></div><div class="name">'+esc(r.v.label)+'</div>'+
+    '<div class="val"><span class="arr">'+(up?"▲ rising":"▼ falling")+'</span>τ '+(up?"+":"−")+Math.abs(r.s.tau).toFixed(2)+' · p '+fmtP(r.s.p)+(r.v.demo?" · demo":"")+'</div></div>';
+  }).join("");
+  void bars.offsetWidth;requestAnimationFrame(()=>requestAnimationFrame(()=>bars.classList.add("in")));
+ }
+ $("bars").addEventListener("click",e=>{const r=e.target.closest(".row");if(r)openVar(r.dataset.key);});
+ $("bars").addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){const r=e.target.closest(".row");if(r){e.preventDefault();openVar(r.dataset.key);}}});
+
+ /* =============== VARIABLE VIEW: window slider + chart =============== */
+ let W0=Y0,W1=Y1,W0f=Y0,W1f=Y1,pend=false,glide=0,activeTh=-1;
+ const rng=$("rng"),th=[$("th0"),$("th1")],sel=$("sel"),span=Y1-Y0;
+ for(let y=Math.ceil(Y0/5)*5;y<=Y1;y+=5){const s=document.createElement("span");s.style.left=((y-Y0)/span*100)+"%";s.textContent=y;$("ticks").appendChild(s);}
+ const presets=[["All years",Y0,Y1],["Since 2010",2010,Y1],["Since 2015",2015,Y1],["Last 10 years",Y1-9,Y1]].filter((p,i,a)=>p[1]>=Y0&&a.findIndex(q=>q[1]===p[1]&&q[2]===p[2])===i);
+ $("chips").innerHTML=presets.map((p,i)=>'<button class="chipb" data-i="'+i+'">'+p[0]+"</button>").join("");
+ $("chips").addEventListener("click",e=>{const b=e.target.closest(".chipb");if(b){const p=presets[+b.dataset.i];glideTo(p[1],p[2]);}});
+ const schedule=()=>{if(pend)return;pend=true;requestAnimationFrame(()=>{pend=false;drawVar();});};
+ function place(){
+  const a=(W0f-Y0)/span*100,b=(W1f-Y0)/span*100;
+  th[0].style.left=a+"%";th[1].style.left=b+"%";sel.style.left=a+"%";sel.style.width=(b-a)+"%";
+  $("b0").textContent=Math.round(W0f);$("b1").textContent=Math.round(W1f);
+  th[0].setAttribute("aria-valuenow",Math.round(W0f));th[1].setAttribute("aria-valuenow",Math.round(W1f));
+  [...$("chips").children].forEach((c,i)=>c.classList.toggle("on",Math.round(W0f)===presets[i][1]&&Math.round(W1f)===presets[i][2]));
+ }
+ function applyFloat(){const a=Math.round(W0f),b=Math.round(W1f);place();if(a!==W0||b!==W1){W0=a;W1=b;schedule();}}
+ function setWin(a,b){cancelAnimationFrame(glide);W0f=a;W1f=b;W0=a;W1=b;place();schedule();}
+ function glideTo(a,b){
+  cancelAnimationFrame(glide);const f0=W0f,f1=W1f,t0=performance.now();
+  const step=now=>{const p=ss((now-t0)/450);W0f=lerp(f0,a,p);W1f=lerp(f1,b,p);applyFloat();if(p<1)glide=requestAnimationFrame(step);};
+  glide=requestAnimationFrame(step);
+ }
+ const yearAt=x=>{const r=rng.getBoundingClientRect();return Math.round(Y0+clamp((x-r.left)/r.width)*span);};
+ function moveTh(i,y){cancelAnimationFrame(glide);if(i===0)y=clamp(y,Y0,W1-MINSPAN);else y=clamp(y,W0+MINSPAN,Y1);
+  if(i===0)W0f=y;else W1f=y;applyFloat();}
+ rng.addEventListener("pointerdown",e=>{
+  const y=yearAt(e.clientX);
+  const d0=Math.abs(y-W0),d1=Math.abs(y-W1);
+  activeTh=d0<d1?0:d0>d1?1:(y<W0?0:1);
+  if(e.target===th[0])activeTh=0;if(e.target===th[1])activeTh=1;
+  try{rng.setPointerCapture(e.pointerId);}catch(_){}
+  th[activeTh].classList.add("drag");moveTh(activeTh,y);e.preventDefault();
+ });
+ rng.addEventListener("pointermove",e=>{if(activeTh>=0)moveTh(activeTh,yearAt(e.clientX));});
+ const endDrag=()=>{if(activeTh>=0){th[activeTh].classList.remove("drag");activeTh=-1;}};
+ rng.addEventListener("pointerup",endDrag);rng.addEventListener("pointercancel",endDrag);rng.addEventListener("lostpointercapture",endDrag);window.addEventListener("blur",endDrag);
+ th.forEach((t,i)=>t.addEventListener("keydown",e=>{
+  const cur=i===0?W0:W1,d={ArrowLeft:-1,ArrowDown:-1,ArrowRight:1,ArrowUp:1,PageDown:-5,PageUp:5}[e.key];
+  if(d){moveTh(i,cur+d);e.preventDefault();}else if(e.key==="Home"){moveTh(i,Y0);e.preventDefault();}else if(e.key==="End"){moveTh(i,Y1);e.preventDefault();}
+ }));
+
+ function openVar(key){
+  const v=V.find(x=>x.key===key);if(!v)return;cvr=v;
+  v._yr=v.dates.map(d=>+d.slice(0,4));v._X=v.dates.map(d=>d+"-01");v._td=v.dates.map(d=>+d.slice(0,4)+(+d.slice(5,7)-.5)/12);
+  $("vt").textContent=v.label;$("vsrc").textContent="Data: "+v.source;$("vdef").textContent=v.definition;$("vwhy").textContent="Why it matters: "+v.why;
+  $("vdemo").innerHTML=v.demo?'<div class="warn">⚠ DEMO DATA: synthetic, not real. Put the real file at '+esc(v.file)+"</div>":"";
+  setView("var");setWin(Y0,Y1);
+ }
+ function drawVar(){
+  const v=cvr;if(!v||view!=="var")return;
+  const y0=W0,y1=W1,u=v.unit,n=v._yr.length;
+  $("wlabel").textContent=y0+" – "+y1;
+  const s=stat(v,y0+"-"+y1);let i0=n,i1=-1;
+  for(let i=0;i<n;i++){const y=v._yr[i];if(y>=y0&&y<=y1){if(i<i0)i0=i;i1=i;}}
+  if(!s||i1<i0){$("verdict").innerHTML="";$("grid").innerHTML="";$("agree").textContent="";
+   $("sentence").textContent="Not enough data in this window (at least 5 years with 6+ months each are needed).";if(window.Plotly)Plotly.purge("ts");return;}
+  const X=v._X,sl=a=>a.slice(i0,i1+1),by={};
+  for(let i=i0;i<=i1;i++){const y=v._yr[i];(by[y]=by[y]||[]).push(v.anom[i]);}
+  const ay=Object.keys(by).filter(y=>by[y].length>=6),am=ay.map(y=>by[y].reduce((a,b)=>a+b,0)/by[y].length);
+  const ends=[i0,i1];
+  if(window.Plotly){
+   const GR={gridcolor:"rgba(255,255,255,.1)"},rect=(xr,yr)=>({type:"rect",xref:xr,yref:yr+" domain",x0:X[i0],x1:X[i1],y0:0,y1:1,fillcolor:"rgba(94,200,255,.10)",line:{width:0},layer:"below"});
+   Plotly.react("ts",[
+    {x:X,y:v.raw,xaxis:"x",yaxis:"y",mode:"lines",showlegend:false,hoverinfo:"skip",line:{color:"rgba(159,179,200,.28)",width:1}},
+    {x:sl(X),y:sl(v.raw),xaxis:"x",yaxis:"y",mode:"lines",name:"Monthly value",line:{color:"#9fb3c8",width:1.4}},
+    {x:X,y:v.anom,xaxis:"x2",yaxis:"y2",mode:"lines",showlegend:false,hoverinfo:"skip",line:{color:"rgba(94,200,255,.2)",width:1}},
+    {x:sl(X),y:sl(v.anom),xaxis:"x2",yaxis:"y2",mode:"lines",name:"Monthly anomaly",line:{color:"rgba(94,200,255,.8)",width:1.4}},
+    {x:ay.map(y=>y+"-07-01"),y:am,xaxis:"x2",yaxis:"y2",mode:"markers",name:"Yearly mean anomaly",marker:{color:"#fff",size:7}},
+    {x:ends.map(i=>X[i]),y:ends.map(i=>s.ic+s.slope*v._td[i]),xaxis:"x2",yaxis:"y2",mode:"lines",name:"Linear trend",line:{color:"#ffb454",width:3}}],
+    {height:440,margin:{l:62,r:16,t:6,b:70},legend:{orientation:"h",y:-.18},dragmode:false,paper_bgcolor:"rgba(0,0,0,0)",plot_bgcolor:"rgba(0,0,0,0)",font:{color:"#eaf6ff",size:12},
+     shapes:[rect("x","y"),rect("x2","y2")],
+     xaxis:Object.assign({anchor:"y",matches:"x2",showticklabels:false,range:[X[0],X[n-1]]},GR),
+     yaxis:Object.assign({domain:[.72,1],title:{text:"raw ("+u+")",font:{size:11}}},GR),
+     xaxis2:Object.assign({anchor:"y2",range:[X[0],X[n-1]]},GR),
+     yaxis2:Object.assign({domain:[0,.64],title:{text:"anomaly ("+u+")",font:{size:11}},zeroline:true,zerolinecolor:"rgba(255,255,255,.5)"},GR)},
+    {displayModeBar:false,responsive:true});
+  }else $("ts").innerHTML='<p class="note">The chart library did not load (internet needed). The numbers below are still correct.</p>';
+  const sig=s.p<.05,ci0=s.lo>0||s.hi<0,yrs=y1-y0+1;
+  $("verdict").innerHTML='<span class="chip '+(sig?"sig":"non")+'">'+(sig?"Statistically significant":"Not statistically significant")+"</span>";
+  const cell=(k,x)=>"<div>"+k+"<b>"+x+"</b></div>";
+  $("grid").innerHTML=cell("Rate of change",fmt(s.slope)+" "+u+"/yr")+cell("95% confidence interval",fmt(s.lo)+" to "+fmt(s.hi))+cell("Mann-Kendall p-value",fmtP(s.p))+
+   cell("Kendall τ",s.tau.toFixed(2))+cell("Years analysed",s.ny)+cell("Change over window","≈ "+fmt(s.slope*yrs)+" "+u);
+  $("sentence").textContent=v.label+" in the "+R.name+" "+(s.slope>0?"increased":"decreased")+" by "+fmt(Math.abs(s.slope))+" "+u+" per year between "+y0+" and "+y1+
+   " (95% CI "+fmt(s.lo)+" to "+fmt(s.hi)+"; Mann-Kendall p = "+fmtP(s.p)+"), so the trend is "+(sig?"statistically significant":"not statistically significant")+".";
+  $("agree").textContent=(sig===ci0)?"Both tests agree.":"The two tests disagree here, so treat this trend with caution.";
+ }
+ layout();
+}
+</script></body></html>
+"""
+
+# The globe + panels are one self-contained web component; it is written next to this file automatically.
+_dir = Path(__file__).resolve().parent / "globe_component"
+_dir.mkdir(exist_ok=True)
+(_dir / "index.html").write_text(COMPONENT_HTML, encoding="utf-8")
+_comp = components.declare_component("trend_globe", path=str(_dir))
+
+st.markdown(
+    """
+<style>
+.stApp{background-color:#03040c;background-image:
+ radial-gradient(1.5px 1.5px at 12% 22%,#fff 50%,transparent 51%),radial-gradient(1px 1px at 78% 14%,#cfe 50%,transparent 51%),
+ radial-gradient(1.5px 1.5px at 35% 78%,#fff 50%,transparent 51%),radial-gradient(1px 1px at 90% 66%,#fff 50%,transparent 51%),
+ radial-gradient(1px 1px at 58% 42%,#bdf 50%,transparent 51%),radial-gradient(1.5px 1.5px at 5% 88%,#fff 50%,transparent 51%);
+ background-size:420px 420px;}
+header[data-testid="stHeader"]{background:transparent;pointer-events:none;}
+header[data-testid="stHeader"] [data-testid="stToolbar"],header[data-testid="stHeader"] button,header[data-testid="stHeader"] a{pointer-events:auto;}
+html,body,.stApp,[data-testid="stAppViewContainer"],[data-testid="stMain"],section.main{scrollbar-width:none !important;-ms-overflow-style:none !important;}
+html::-webkit-scrollbar,body::-webkit-scrollbar,.stApp::-webkit-scrollbar,[data-testid="stAppViewContainer"]::-webkit-scrollbar,[data-testid="stMain"]::-webkit-scrollbar,section.main::-webkit-scrollbar{display:none !important;width:0 !important;height:0 !important;}
+.block-container{padding:1rem 1.2rem 0 !important;max-width:100% !important;}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+@st.cache_data(show_spinner="Crunching trend statistics for every time window...")
+def load(signature):  # signature changes when you add/replace a CSV, so the cache refreshes
+    return bk.build_payload()
+
+
+payload, warnings = load(bk.data_signature())
+for w in warnings:
+    st.warning(w)
+
+# All statistics (every slider window) are computed in backend.py and handed to the front end,
+# so the slider responds instantly with no server round-trip.
+_comp(payload=payload, key="main")
